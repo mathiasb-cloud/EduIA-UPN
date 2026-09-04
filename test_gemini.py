@@ -4,7 +4,6 @@ from dotenv import load_dotenv
 from google import genai
 from google.genai import types
 
-# Carga las variables del archivo .env
 load_dotenv()
 
 def extraer_texto_pdf(ruta_archivo: str) -> str:
@@ -26,7 +25,6 @@ def extraer_texto_pdf(ruta_archivo: str) -> str:
 
 def consultar_fechas_gemini(texto_silabo: str) -> str:
     """Envía el texto a Gemini para extraer y estructurar las fechas de evaluación."""
-    # El cliente asume automáticamente que GEMINI_API_KEY está en el entorno
     client = genai.Client()
 
     prompt = f"""
@@ -44,7 +42,6 @@ def consultar_fechas_gemini(texto_silabo: str) -> str:
     """
 
     try:
-        # Modelo actualizado a la versión vigente
         response = client.models.generate_content(
             model='gemini-3.6-flash',
             contents=prompt,

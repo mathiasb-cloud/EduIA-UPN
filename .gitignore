@@ -15,3 +15,5 @@ Thumbs.db
 
 # PDFs de prueba locales (opcional, para no subir documentos privados)
 *.pdf
+
+auth.json

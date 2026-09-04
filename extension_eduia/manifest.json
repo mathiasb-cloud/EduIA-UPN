@@ -1,0 +1,13 @@
+{
+  "manifest_version": 3,
+  "name": "EduIA-UPN Mentor",
+  "version": "1.0",
+  "description": "Tu asistente académico flotante para Blackboard.",
+  "permissions": ["activeTab", "scripting"],
+  "content_scripts": [
+    {
+      "matches": ["*://upn.blackboard.com/*"],
+      "js": ["content.js"]
+    }
+  ]
+}

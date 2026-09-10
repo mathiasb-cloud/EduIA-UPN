@@ -52,3 +52,38 @@ botonFlotante.addEventListener("click", () => {
     panelChat.style.display = "none";
   }
 });
+
+const inputPregunta = document.getElementById("eduia-input");
+const contenedorMensajes = document.getElementById("eduia-mensajes");
+
+inputPregunta.addEventListener("keypress", async (e) => {
+  if (e.key === "Enter" && inputPregunta.value.trim() !== "") {
+    const pregunta = inputPregunta.value;
+    inputPregunta.value = "";
+    
+    contenedorMensajes.innerHTML += `<div style="margin-bottom:10px; color:#ff5e14;"><b>Tú:</b> ${pregunta}</div>`;
+    
+    const textoPagina = document.body.innerText;
+    
+    contenedorMensajes.innerHTML += `<div id="eduia-loading" style="margin-bottom:10px; color:#666;"><i>Analizando Blackboard...</i></div>`;
+    contenedorMensajes.scrollTop = contenedorMensajes.scrollHeight;
+
+    try {
+      const response = await fetch("http://localhost:8000/preguntar", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ pregunta: pregunta, contexto_pagina: textoPagina })
+      });
+      
+      const data = await response.json();
+      document.getElementById("eduia-loading").remove();
+      
+      // 4. Mostrar respuesta de EduIA
+      contenedorMensajes.innerHTML += `<div style="margin-bottom:15px; color:#333; line-height:1.4;"><b>EduIA:</b><br>${data.respuesta.replace(/\n/g, '<br>')}</div>`;
+      contenedorMensajes.scrollTop = contenedorMensajes.scrollHeight;
+    } catch (error) {
+      document.getElementById("eduia-loading").remove();
+      contenedorMensajes.innerHTML += `<div style="margin-bottom:10px; color:red;"><b>Error:</b> El servidor Python (api.py) no está encendido.</div>`;
+    }
+  }
+});

@@ -1,138 +1,160 @@
-from fastapi import FastAPI
-from fastapi.middleware.cors import CORSMiddleware
-from pydantic import BaseModel
-from google import genai
-from PIL import Image
-import io
-import base64
-import os
+"""EduIA-UPN · API del tutor académico para Blackboard.
+
+Ejecutar:  uvicorn api:app --reload
+"""
+import asyncio
 import json
-import time
-from datetime import datetime
-from apscheduler.schedulers.background import BackgroundScheduler
-from twilio.rest import Client
+import logging
+import os
+from contextlib import asynccontextmanager
+
 from dotenv import load_dotenv
 
 load_dotenv()
-app = FastAPI()
 
+from fastapi import FastAPI, HTTPException, Query, Request  # noqa: E402
+from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
+from fastapi.responses import StreamingResponse  # noqa: E402
+from pydantic import BaseModel, Field  # noqa: E402
+
+import almacen  # noqa: E402
+import documentos  # noqa: E402
+import recordatorios  # noqa: E402
+import tutor  # noqa: E402
+
+logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
+logging.getLogger("apscheduler").setLevel(logging.WARNING)
+log = logging.getLogger("eduia.api")
+
+MAX_BYTES_DOCUMENTO = 40 * 1024 * 1024
+
+
+@asynccontextmanager
+async def ciclo_de_vida(_: FastAPI):
+    almacen.inicializar()
+    recordatorios.iniciar()
+    yield
+    recordatorios.detener()
+
+
+app = FastAPI(title="EduIA-UPN", version="2.0.0", lifespan=ciclo_de_vida)
+
+# Solo la extensión (y Blackboard) pueden llamar a la API desde un navegador.
 app.add_middleware(
-    CORSMiddleware, allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+    CORSMiddleware,
+    allow_origin_regex=os.getenv("EDUIA_CORS_REGEX", r"^(chrome-extension://[a-p]{32}|https://upn\.blackboard\.com)$"),
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
-planificador = BackgroundScheduler()
-planificador.start()
 
-TWILIO_SID = os.getenv("TWILIO_SID", "ACc4121250189c98cf711547889b5a8ac4")
-TWILIO_TOKEN = os.getenv("TWILIO_TOKEN", "4b8387be759aac32cd5fea9c3be7a7fd")
-TWILIO_NUMERO = "whatsapp:+51926600376"
-MI_NUMERO = "whatsapp:+51999888777"
+@app.get("/salud")
+def salud():
+    return {
+        "ok": True,
+        "modelos": tutor.MODELOS,
+        "whatsapp_configurado": bool(os.getenv("TWILIO_SID") and os.getenv("TWILIO_WHATSAPP_FROM")),
+    }
 
-def enviar_whatsapp(tarea_texto: str):
-    cliente_tw = Client(TWILIO_SID, TWILIO_TOKEN)
-    cliente_tw.messages.create(
-        from_=TWILIO_NUMERO,
-        body=f"🎓 *EduIA-UPN Alerta:*\n{tarea_texto}",
-        to=MI_NUMERO
+
+@app.post("/chat")
+async def chat(solicitud: tutor.Solicitud):
+    async def eventos():
+        try:
+            async for evento in tutor.responder(solicitud):
+                yield json.dumps(evento, ensure_ascii=False) + "\n"
+        except Exception:
+            log.exception("Error inesperado en /chat")
+            yield json.dumps({"t": "error", "v": "Ocurrió un error inesperado. Toca «Reintentar»."}) + "\n"
+
+    return StreamingResponse(
+        eventos(),
+        media_type="application/x-ndjson",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
 
-class Consulta(BaseModel):
-    pregunta: str
-    contexto_pagina: str
-    imagen_base64: str = None
 
-def clasificar_intencion(pregunta: str, cliente) -> bool:
-    prompt_clasificador = f"""
-    Analiza esta petición de un estudiante universitario.
-    ¿Está pidiendo que le resuelvan el trabajo completo, le den el código fuente final, o le redacten un informe clínico/ensayo?
-    Responde ÚNICAMENTE con "BLOQUEAR" si busca la solución fácil, o "PERMITIR" si busca orientación, teoría o depuración.
-    
-    Petición: {pregunta}
-    """
+@app.post("/documentos")
+async def subir_documento(
+    request: Request,
+    nombre: str = Query("documento", max_length=300),
+    mime: str = Query("", max_length=150),
+):
+    datos = await request.body()
+    if not datos:
+        raise HTTPException(400, "El archivo llegó vacío.")
+    if len(datos) > MAX_BYTES_DOCUMENTO:
+        raise HTTPException(413, "El archivo supera los 40 MB.")
     try:
-        respuesta = cliente.models.generate_content(
-            model='gemini-3.6-flash',
-            contents=prompt_clasificador
-        )
-        return "BLOQUEAR" in respuesta.text.strip().upper()
-    except:
-        return False
-
-@app.post("/preguntar")
-def responder_duda(consulta: Consulta):
-    cliente = genai.Client()
-    
-    prompt_detector = f"""
-    Analiza esta petición: "{consulta.pregunta}"
-    ¿El usuario está pidiendo que se le recuerde algo o se le envíe un aviso a futuro?
-    Si es así, extrae la fecha/hora y el motivo. Hoy es {datetime.now().strftime("%Y-%m-%d %H:%M")}.
-    Responde ÚNICAMENTE en este formato JSON si es un recordatorio, o "NO" si es una pregunta normal:
-    {{"fecha_hora": "YYYY-MM-DD HH:MM:SS", "mensaje": "Texto del recordatorio"}}
-    """
-    
-    try:
-        analisis_recordatorio = cliente.models.generate_content(
-            model='gemini-3.6-flash',
-            contents=prompt_detector
-        ).text.strip()
-        
-        if analisis_recordatorio != "NO":
-            datos = json.loads(analisis_recordatorio)
-            fecha_obj = datetime.strptime(datos["fecha_hora"], "%Y-%m-%d %H:%M:%S")
-            
-            planificador.add_job(
-                enviar_whatsapp, 
-                'date', 
-                run_date=fecha_obj, 
-                args=[datos["mensaje"]]
-            )
-            return {"respuesta": f"✅ Listo. Te enviaré un WhatsApp el **{datos['fecha_hora']}** para recordarte: *{datos['mensaje']}*."}
-            
+        return await asyncio.to_thread(documentos.procesar, nombre, mime, datos)
+    except documentos.DocumentoInvalido as e:
+        raise HTTPException(422, str(e))
     except Exception:
-        pass
+        log.exception("No se pudo procesar %s", nombre)
+        raise HTTPException(422, "No se pudo leer el archivo.")
 
-    es_solucion_directa = clasificar_intencion(consulta.pregunta, cliente)
-    
-    if es_solucion_directa:
-        prompt_maestro = f"""
-        Eres EduIA-UPN, un mentor académico estricto. El estudiante intentó que le resuelvas su tarea: "{consulta.pregunta}"
-        
-        NO resuelvas el ejercicio ni le des la respuesta final. Aplica el método socrático:
-        1. Señala amablemente que tu rol es guiar su lógica, no hacer el trabajo.
-        2. Hazle una pregunta técnica clave. Si pide código, oblígalo a pensar en la validación de entradas con Scanner o el manejo de excepciones. Si pide un plan de tratamiento en terapia manual, pregúntale primero por los hallazgos en su evaluación postural o los rangos de movimiento activo-asistido.
-        
-        Texto en pantalla: {consulta.contexto_pagina[:2000]}
-        """
-    else:
-        prompt_maestro = f"""
-        Eres EduIA-UPN. Analiza la imagen y el texto de la pantalla.
-        Responde su duda guiándolo paso a paso. Mantén un tono académico, claro y motivador.
-        
-        Texto en pantalla: {consulta.contexto_pagina[:2000]}
-        Pregunta: {consulta.pregunta}
-        """
-        
-    contenidos = [prompt_maestro]
-    
-    if consulta.imagen_base64:
-        formato, imgstr = consulta.imagen_base64.split(';base64,')
-        imagen_bytes = base64.b64decode(imgstr)
-        imagen_pil = Image.open(io.BytesIO(imagen_bytes))
-        contenidos.insert(0, imagen_pil) 
 
-    intentos_maximos = 3
-    for intento in range(intentos_maximos):
-        try:
-            respuesta = cliente.models.generate_content(
-                model='gemini-3.6-flash',
-                contents=contenidos
-            )
-            return {"respuesta": respuesta.text}
-            
-        except Exception as e:
-            error_str = str(e)
-            if "503" in error_str and intento < intentos_maximos - 1:
-                time.sleep(2)
-                continue
-                
-            return {"respuesta": f"[!] El sistema está procesando demasiadas solicitudes en este momento. Por favor, intenta de nuevo en unos segundos."}
+class NuevoRecordatorio(BaseModel):
+    alumno: str = Field(min_length=1, max_length=120)
+    whatsapp: str = ""
+    mensaje: str = Field(min_length=1, max_length=500)
+    tipo: str = "otro"
+    fecha_hora: str
+
+
+@app.get("/recordatorios")
+def listar_recordatorios(alumno: str = Query(min_length=1, max_length=120)):
+    return recordatorios.listar(alumno)
+
+
+@app.post("/recordatorios")
+def crear_recordatorio(datos: NuevoRecordatorio):
+    try:
+        rec = recordatorios.crear(datos.alumno, datos.whatsapp, datos.mensaje, datos.tipo, datos.fecha_hora)
+    except recordatorios.ErrorRecordatorio as e:
+        raise HTTPException(422, str(e))
+    return rec | {"aviso": recordatorios.confirmar(rec, datos.whatsapp)}
+
+
+@app.delete("/recordatorios/{recordatorio_id}")
+def cancelar_recordatorio(recordatorio_id: int, alumno: str = Query(min_length=1, max_length=120)):
+    if not recordatorios.cancelar(alumno, recordatorio_id):
+        raise HTTPException(404, "No encontré ese recordatorio pendiente.")
+    return {"ok": True}
+
+
+class PruebaWhatsApp(BaseModel):
+    whatsapp: str = ""
+    nombre: str = ""
+
+
+@app.post("/whatsapp/prueba")
+def probar_whatsapp(datos: PruebaWhatsApp):
+    try:
+        telefono = recordatorios.telefono_para(datos.whatsapp)
+        saludo = f", {datos.nombre}" if datos.nombre else ""
+        recordatorios.enviar_whatsapp(
+            telefono, f"👋 ¡Hola{saludo}! Soy *EduIA-UPN*. Así te llegarán tus recordatorios de exámenes, tareas y clases. 🎓"
+        )
+    except recordatorios.ErrorRecordatorio as e:
+        raise HTTPException(422, str(e))
+    return {"ok": True, "telefono": recordatorios.telefono_oculto(telefono)}
+
+
+class Valoracion(BaseModel):
+    util: bool
+    modelo: str = ""
+    tipo_pagina: str = ""
+    comentario: str = Field("", max_length=500)
+
+
+@app.post("/valoraciones")
+def valorar(valoracion: Valoracion):
+    almacen.registrar_valoracion(valoracion.util, valoracion.modelo, valoracion.tipo_pagina, valoracion.comentario)
+    return {"ok": True}
+
+
+@app.get("/metricas")
+def ver_metricas(dias: int = Query(7, ge=1, le=365)):
+    """Uso agregado y anónimo (sin contenido de las conversaciones), pensado para la universidad."""
+    return almacen.metricas(dias)

@@ -17,3 +17,5 @@ Thumbs.db
 *.pdf
 
 auth.json
+# Datos locales de EduIA (base SQLite, caché de documentos)
+datos/

@@ -1,13 +1,25 @@
 {
   "manifest_version": 3,
-  "name": "EduIA-UPN Mentor",
-  "version": "1.0",
-  "description": "Tu asistente académico flotante para Blackboard.",
-  "permissions": ["activeTab", "scripting"],
+  "name": "EduIA-UPN · Tutor en Blackboard",
+  "short_name": "EduIA-UPN",
+  "version": "2.0.0",
+  "description": "Tu tutor académico dentro de Blackboard UPN: entiende la página que ves, te guía paso a paso y te recuerda tus entregas por WhatsApp.",
+  "permissions": ["storage"],
+  "host_permissions": [
+    "http://localhost:8000/*",
+    "http://127.0.0.1:8000/*",
+    "https://upn.blackboard.com/*",
+    "https://*.blackboard.com/*",
+    "https://*.content.blackboardcdn.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
   "content_scripts": [
     {
-      "matches": ["*://upn.blackboard.com/*"],
-      "js": ["content.js"]
+      "matches": ["https://upn.blackboard.com/*"],
+      "js": ["src/markdown.js", "src/contexto.js", "src/estilos.js", "src/componentes.js", "src/paneles.js", "content.js"],
+      "run_at": "document_idle"
     }
   ]
 }
